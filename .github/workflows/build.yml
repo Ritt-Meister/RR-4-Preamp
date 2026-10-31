@@ -1,0 +1,36 @@
+name: Build RR-4 Preamp
+
+on:
+  push:
+  workflow_dispatch:
+
+jobs:
+  build-mac:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Konfigurieren
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Bauen
+        run: cmake --build build --config Release --parallel 4
+
+      - name: Signieren (ad hoc)
+        run: |
+          find build -name "*.vst3" -o -name "*.component" | while read p; do
+            codesign --force --deep -s - "$p"
+          done
+
+      - name: Plugins sammeln
+        run: |
+          mkdir -p out
+          find build -name "*.vst3" -maxdepth 6 -exec cp -R {} out/ \;
+          find build -name "*.component" -maxdepth 6 -exec cp -R {} out/ \;
+          ls -la out
+
+      - name: Hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: RR-4-Preamp-macOS
+          path: out
