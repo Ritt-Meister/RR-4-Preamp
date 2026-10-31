@@ -41,14 +41,18 @@ public:
         chans = std::vector<Chan> ((size_t) nCh);
 
         const float fs = (float) sr;
-        hpfCoefs  = juce::dsp::IIR::Coefficients<float>::makeHighPass (sr, 80.0f, 0.7071f);
+        hpfCoefs  = juce::dsp::IIR::Coefficients<float>::makeHighPass (sr, 120.0f, 1.0f);
+        hpf1Coefs = juce::dsp::IIR::Coefficients<float>::makeFirstOrderHighPass (sr, 120.0f);   // zusammen 18 dB/Okt
         loadCoefs = juce::dsp::IIR::Coefficients<float>::makePeakFilter (sr, juce::jmin (12000.0f, fs * 0.45f), 0.8f, juce::Decibels::decibelsToGain (2.5f));
-        weightCoefs = juce::dsp::IIR::Coefficients<float>::makeLowShelf (sr, 110.0f, 0.7f, 1.0f);
-        silkCoefs = juce::dsp::IIR::Coefficients<float>::makeHighShelf (sr, juce::jmin (9000.0f, fs * 0.4f), 0.6f, 1.0f);
+        weightCoefs = juce::dsp::IIR::Coefficients<float>::makePeakFilter (sr, 80.0f, 0.9f, 1.0f);
+        weight2Coefs = juce::dsp::IIR::Coefficients<float>::makePeakFilter (sr, 250.0f, 0.8f, 1.0f);
+        silkCoefs = juce::dsp::IIR::Coefficients<float>::makeHighShelf (sr, juce::jmin (6500.0f, fs * 0.4f), 0.6f, 1.0f);
 
         for (auto& c : chans)
         {
             c.hpf.coefficients    = hpfCoefs;
+            c.hpf1.coefficients   = hpf1Coefs;
+            c.weight2.coefficients = weight2Coefs;
             c.load.coefficients   = loadCoefs;
             c.weight.coefficients = weightCoefs;
             c.silk.coefficients   = silkCoefs;
@@ -63,7 +67,7 @@ public:
         vuCoef = coefFor (0.065, sr);
 
         trafoLowCoef = 1.0f - std::exp (-juce::MathConstants<float>::twoPi * 140.0f / (float) osSr);
-        silkLpCoef   = 1.0f - std::exp (-juce::MathConstants<float>::twoPi * 4000.0f / (float) osSr);
+        silkLpCoef   = 1.0f - std::exp (-juce::MathConstants<float>::twoPi * 3000.0f / (float) osSr);
 
         inGainSm.reset (sr, 0.015);
         hpfSm.reset (sr, 0.020);
@@ -82,7 +86,7 @@ public:
     {
         for (auto& c : chans)
         {
-            c.hpf.reset(); c.load.reset(); c.weight.reset(); c.silk.reset();
+            c.hpf.reset(); c.hpf1.reset(); c.load.reset(); c.weight.reset(); c.weight2.reset(); c.silk.reset();
             c.envFast = c.envSlow = c.dcX = c.dcY = c.trafoLow = c.silkLp = 0.0f;
             c.punchGain = 1.0f;
         }
@@ -124,7 +128,7 @@ public:
 private:
     struct Chan
     {
-        juce::dsp::IIR::Filter<float> hpf, load, weight, silk;
+        juce::dsp::IIR::Filter<float> hpf, hpf1, load, weight, weight2, silk;
         float envFast = 0, envSlow = 0, punchGain = 1, dcX = 0, dcY = 0, trafoLow = 0, silkLp = 0;
     };
 
@@ -143,7 +147,7 @@ private:
         const float gDb = (p.line ? p.trimDb : p.gainDb) - (p.pad ? 20.0f : 0.0f);
         const float g   = juce::Decibels::decibelsToGain (gDb, -100.0f) * (p.phase ? -1.0f : 1.0f);
         const float load = (p.micLoad && ! p.line) ? 1.0f : 0.0f;
-        const float a = 1.0f + 5.0f * p.drive;
+        const float a = 1.0f + 14.0f * p.drive;
 
         if (first)
         {
@@ -180,14 +184,15 @@ private:
         if (std::abs (p.weightDb - lastWeight) > 0.001f)
         {
             lastWeight = p.weightDb;
-            weightCoefs = juce::dsp::IIR::Coefficients<float>::makeLowShelf (sr, 110.0f, 0.7f, juce::Decibels::decibelsToGain (p.weightDb));
-            for (auto& c : chans) c.weight.coefficients = weightCoefs;
+            weightCoefs  = juce::dsp::IIR::Coefficients<float>::makePeakFilter (sr, 80.0f, 0.9f, juce::Decibels::decibelsToGain (p.weightDb));
+            weight2Coefs = juce::dsp::IIR::Coefficients<float>::makePeakFilter (sr, 250.0f, 0.8f, juce::Decibels::decibelsToGain (-0.35f * juce::jmax (0.0f, p.weightDb)));
+            for (auto& c : chans) { c.weight.coefficients = weightCoefs; c.weight2.coefficients = weight2Coefs; }
         }
         if (std::abs (p.silk - lastSilk) > 0.001f)
         {
             lastSilk = p.silk;
-            silkCoefs = juce::dsp::IIR::Coefficients<float>::makeHighShelf (sr, juce::jmin (9000.0f, (float) sr * 0.4f), 0.6f,
-                                                                           juce::Decibels::decibelsToGain (3.0f * p.silk));
+            silkCoefs = juce::dsp::IIR::Coefficients<float>::makeHighShelf (sr, juce::jmin (6500.0f, (float) sr * 0.4f), 0.6f,
+                                                                           juce::Decibels::decibelsToGain (4.5f * p.silk));
             for (auto& c : chans) c.silk.coefficients = silkCoefs;
         }
     }
@@ -250,13 +255,12 @@ private:
                 msIn += x * x;
                 x *= g;
 
-                const float hp = st.hpf.processSample (x);
+                const float hp = st.hpf1.processSample (st.hpf.processSample (x));
                 x += hpfMix * (hp - x);
 
                 const float pk = st.load.processSample (x);
                 x += loadMix * (pk - x);
 
-                x = st.weight.processSample (x);
 
                 // Transienten-Punch
                 const float ax = std::abs (x);
@@ -265,9 +269,11 @@ private:
                 float targetGain = 1.0f;
                 if (st.envSlow > 1.0e-4f && punchAm > 0.0001f)
                 {
-                    const float rDb = 20.0f * std::log10 (juce::jmax (1.0f, st.envFast / st.envSlow));
-                    const float boostDb = punchAm * 6.0f * juce::jlimit (0.0f, 1.0f, rDb / 6.0f);
-                    targetGain = juce::Decibels::decibelsToGain (boostDb);
+                    const float rDb = 20.0f * std::log10 (juce::jmax (1.0e-4f, st.envFast / st.envSlow));
+                    float gDb = 0.0f;
+                    if (rDb > 0.0f)  gDb =  punchAm * 12.0f * juce::jlimit (0.0f, 1.0f, rDb / 4.0f);   // Anschlag anheben
+                    else             gDb = -punchAm *  4.0f * juce::jlimit (0.0f, 1.0f, -rDb / 6.0f);  // Ausklang straffen
+                    targetGain = juce::Decibels::decibelsToGain (gDb);
                 }
                 st.punchGain += punchSmooth * (targetGain - st.punchGain);
                 x *= st.punchGain;
@@ -305,9 +311,9 @@ private:
                 // Silk: asymmetrisch gesaettigte Hoehen -> 2./3. Harmonische ("Luft")
                 st.silkLp += silkLpCoef * (y - st.silkLp);
                 const float hf = y - st.silkLp;
-                const float u  = hf * 6.0f;
-                const float ex = (std::tanh (u + 0.3f) - 0.29131f - 0.9151f * u) / 6.0f;
-                y += silk * 2.5f * ex;
+                // 2. Harmonische (hf^2) und 3. Harmonische (hf^3), pegelabhaengig, weich begrenzt
+                const float raw = 0.8f * hf * hf + 5.0f * hf * hf * hf;
+                y += silk * 0.3f * std::tanh (raw / 0.3f);
 
                 d[j] = y;
             }
@@ -327,7 +333,7 @@ private:
 
                 const float y = x - st.dcX + dcR * st.dcY;
                 st.dcX = x; st.dcY = y;
-                x = st.silk.processSample (y);
+                x = st.silk.processSample (st.weight2.processSample (st.weight.processSample (y)));
 
                 x *= og;
                 msOut += x * x;
@@ -347,7 +353,7 @@ private:
 
     std::unique_ptr<juce::dsp::Oversampling<float>> oversampling;
     std::vector<Chan> chans;
-    juce::dsp::IIR::Coefficients<float>::Ptr hpfCoefs, loadCoefs, weightCoefs, silkCoefs;
+    juce::dsp::IIR::Coefficients<float>::Ptr hpfCoefs, hpf1Coefs, loadCoefs, weightCoefs, weight2Coefs, silkCoefs;
 
     juce::SmoothedValue<float> inGainSm, hpfSm, loadSm, punchSm, outSm, driveSm, silkSm, fadeSm;
 
